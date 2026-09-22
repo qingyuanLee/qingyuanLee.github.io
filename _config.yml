@@ -64,8 +64,8 @@ kramdown:
 # Gitalk
 gitalk:
   enable: true    #是否开启Gitalk评论
-  clientID: d18b343dd9c7ca49518a                            #生成的clientID
-  clientSecret: 539e88b8a7feffaddbb553b9c421dfefcbc6eced    #生成的clientSecret
+  clientID: Ov23licAR0eh1vfsZyED                            #生成的clientID
+  clientSecret: 6f1e4eb093c3408033ee2fd95a6bd5013efa2b6f    #生成的clientSecret
   repo: qingyuanLee.github.io    #仓库名称
   owner: qingyuanLee    #github用户名
   admin: qingyuanLee
