@@ -12,7 +12,7 @@ github_repo: "https://github.com/qingyuanLee/qingyuanLee.github.io.git" # you co
 # Sidebar settings
 sidebar: true                           # whether or not using Sidebar.
 sidebar-about-description: "技术与生活，记录与思考"
-sidebar-avatar: /img/about-HJ.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`
+sidebar-avatar: /img/avatar-panda.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`
 
 
 
