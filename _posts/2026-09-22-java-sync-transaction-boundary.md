@@ -13,6 +13,8 @@ tags:
     - 事务
 ---
 
+![Java 同步锁与事务边界](/img/posts/java-sync-transaction-boundary-cover.jpg)
+
 ## 一个反复出现的坑
 
 做后端的同学几乎都踩过一类问题：本地缓存一把 `synchronized` 锁，方法上加了 `@Transactional`，单测一切正常，可一上生产、一遇到重试和并发，数据就莫名其妙地重复落库。
@@ -72,6 +74,9 @@ Spring 的声明式事务本质上是**基于 AOP 代理**实现的。当你调�
 - 当 `synchronized` 在 `@Transactional` 方法**里面**：代理先开事务 → 进方法 → 拿锁 → 放锁 → 出方法 → 提交事务。锁在提交之前就放了，危险。
 
 很多人下意识地把锁"就近"加在共享资源访问的代码周围，结果刚好选了危险的那种写法。
+
+> 📐 **执行时序对比**：[查看高清原图](https://www.processon.com/view/link/6ab2420167be235e1095586b)
+> *图注：synchronized 在 @Transactional 内部（错误）vs 外部（正确）的执行时序与锁释放时机对比*
 
 ## 正确做法：把事务"缩"到锁里面
 
