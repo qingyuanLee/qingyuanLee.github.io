@@ -17,6 +17,9 @@ tags:
 
 ## 一个反复出现的坑
 
+![反复踩中的同步锁与事务陷阱](/img/posts/java-sync-transaction-boundary/01-recurring-pit.jpg)
+*图：开发者正走向 synchronized 与 @Transactional 之间隐蔽的坑洞*
+
 做后端的同学几乎都踩过一类问题：本地缓存一把 `synchronized` 锁，方法上加了 `@Transactional`，单测一切正常，可一上生产、一遇到重试和并发，数据就莫名其妙地重复落库。
 
 我在一次线上问题复盘中，把这个坑完整地记录了下来。它不是什么高深的并发理论，恰恰是因为"看起来都对"——锁也加了，事务也加了，顺序也写了——才最容易被忽略。
@@ -24,6 +27,9 @@ tags:
 > 核心结论先放这里：**当你同步锁内部的临界区，依赖的是事务包裹下的数据状态时，必须保证同步锁的范围大于等于事务的范围。锁不能比事务更早释放。**
 
 ## 事故现场：一次回传重试造成的脏数据
+
+![多条重复数据流涌入同一数据库](/img/posts/java-sync-transaction-boundary/02-dirty-data-incident.jpg)
+*图：相同记录被多次写入数据库，触发重复数据警报*
 
 事情发生在一次模型训练结果的回传重试流程里。业务上，系统会把训练好的模型应用回传到下游，并在失败时进行重试。这段逻辑的代码结构大致是这样的：
 
@@ -57,6 +63,9 @@ public void callbackRetry(Task task) {
 
 ## 为什么会这样：从 Spring 事务的本质说起
 
+![Spring 声明式事务基于 AOP 代理](/img/posts/java-sync-transaction-boundary/03-aop-proxy-essence.jpg)
+*图：AOP 代理层包裹目标方法，在方法前后完成事务开启与提交*
+
 要理解这个问题，得先想清楚 `@Transactional` 到底是什么。
 
 Spring 的声明式事务本质上是**基于 AOP 代理**实现的。当你调用一个被 `@Transactional` 标注的方法时，真正先执行的是代理逻辑：
@@ -79,6 +88,9 @@ Spring 的声明式事务本质上是**基于 AOP 代理**实现的。当你调�
 > *图注：synchronized 在 @Transactional 内部（错误）vs 外部（正确）的执行时序与锁释放时机对比*
 
 ## 正确做法：把事务"缩"到锁里面
+
+![锁在外层、事务在内层的同心嵌套结构](/img/posts/java-sync-transaction-boundary/04-lock-around-tx.jpg)
+*图：外层锁盾牌包住事务圆环，最内核才是数据库落库操作*
 
 复盘之后，我们定下的规范做法是——**反转嵌套关系，让锁在外层、事务在内层**。
 
@@ -114,6 +126,9 @@ public void doCallbackInTx(Task task) {
 这里有一个 Spring 老坑必须提醒：**同类内部调用会让 `@Transactional` 失效**。如果你在同一个类里写 `this.doCallbackInTx(...)`，代理根本不生效，事务形同虚设。所以方法 B 一定要放在**另一个 Bean** 里注入调用，或者自己注入自己（self-injection），又或者用 `TransactionTemplate` 编程式地控制事务边界。这个细节写错，整个重构就白做了。
 
 ## 几张可以贴在工位上的检查表
+
+![可贴在工位上的检查清单卡片](/img/posts/java-sync-transaction-boundary/05-checklist.jpg)
+*图：白板前的打勾清单，沉淀为 code review 时的判断准则*
 
 把这类问题沉淀成几条可复用的判断准则：
 
