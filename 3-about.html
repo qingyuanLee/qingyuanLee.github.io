@@ -135,6 +135,24 @@ header-img: "img/post-bg-rwd.jpg"
 {% endif %}
 <!-- Gitalk end -->
 
+<!-- Waline 评论 start  -->
+{% if site.waline.enable %}
+<link rel="stylesheet" href="https://unpkg.com/@waline/client@v3/dist/waline.css">
+<div id="waline"></div>
+<script>
+    Waline.init({
+        el: '#waline',
+        serverURL: '{{site.waline.serverURL}}',
+        lang: 'zh-CN',
+        path: window.location.pathname,
+        comment: true,
+        pageview: false,
+        dark: 'auto',
+    });
+</script>
+{% endif %}
+<!-- Waline end -->
+
  <!-- disqus 评论框 start  -->
 {% if site.disqus.enable %}
 

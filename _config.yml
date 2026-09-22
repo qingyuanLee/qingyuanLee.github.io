@@ -71,6 +71,11 @@ gitalk:
   admin: qingyuanLee
   distractionFreeMode: true #是否启用类似FB的阴影遮罩
 
+# Waline（基于 LeanCloud + Vercel 的自托管评论，可在页面直接编辑/删除自己的评论）
+waline:
+  enable: false    #是否开启 Waline（开启后请将 gitalk.enable 置为 false）
+  serverURL: ""    # Waline 后端地址，如 https://xxx.vercel.app
+
 
 # 统计
 
