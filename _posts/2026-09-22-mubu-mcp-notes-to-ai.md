@@ -37,6 +37,20 @@ MCP（Model Context Protocol）是 Anthropic 在 2024 年底提出的开放协�
 - **Client（客户端）**：宿主内置的协议客户端，负责与 Server 通信
 - **Server（服务端）**：把具体工具能力包装成标准接口的进程，如"幕布 MCP Server"
 
+如果从协议栈的角度看，MCP 可以拆成自下而上的 **五层分层架构**：
+
+| 层级 | 名称 | 职责 | 示例 |
+|---|---|---|---|
+| L1 | 应用层（Host） | 运行大模型、承载对话与业务逻辑 | 豆包、Claude Desktop、Cursor |
+| L2 | 客户端层（Client） | 协议客户端，管理会话与连接生命周期 | MCP Client |
+| L3 | 协议层（Protocol） | JSON-RPC 2.0 消息、生命周期管理、能力协商 | initialize / capabilities |
+| L4 | 传输层（Transport） | 消息的物理通道，决定部署形态 | stdio、Streamable HTTP、SSE |
+| L5 | 服务层（Server） | 暴露 Tools / Resources / Prompts 原语 | 幕布 MCP Server |
+
+这五层各司其职：Host 负责"懂业务"，Client 负责"管连接"，协议层保证"能通信"，传输层决定"在哪跑"（本地进程还是远程服务），Server 最终把能力暴露成标准原语。理解分层后，很多困惑就清楚了——比如为什么我的两个 MCP 都要走 stdio：因为传输层选型（L4）决定了凭据、延迟与部署方式，本地工具天然适合进程管道。
+
+> 🗺️ MCP 五层协议栈架构图（ProcessOn 可编辑原图，可放大查看分层容器与连线）：[查看高清架构图](https://www.processon.com/view/link/6ab340fb6a29601cdfc86a65)
+
 架构上，Client 与 Server 通过 JSON-RPC 通信，可以走 **stdio**（本地进程管道，如本机运行）或 **SSE/HTTP**（远程服务）。我的两个 MCP 项目都用了 stdio 模式——因为笔记、画图这类工具往往需要本地凭据，且延迟低。
 
 ## mubu-mcp：把幕布变成 AI 能读写的知识库
