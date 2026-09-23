@@ -51,6 +51,25 @@ MCP（Model Context Protocol）是 Anthropic 在 2024 年底提出的开放协�
 
 > 🗺️ MCP 五层协议栈架构图（ProcessOn 可编辑原图，可放大查看分层容器与连线）：[查看高清架构图](https://www.processon.com/view/link/6ab340fb6a29601cdfc86a65)
 
+### 2026-07-28：MCP 发布以来最大的一次修订
+
+写这篇文章时，MCP 刚发布了 **2026-07-28** 版规范（相对 2025-11-25 的修订），核心变化可以概括为三个词：**无状态、可扩展、企业级**。主要变更：
+
+| 方向 | 变化 | 说明 |
+|---|---|---|
+| 无状态核心 | 移除握手与会话 | `initialize`/`initialized` 握手和 `Mcp-Session-Id` 头移除，每请求在 `_meta` 携带协议版本与能力，请求可落到任意实例，天然水平扩展 |
+| 版本发现 | 新增 `server/discover` | 服务端声明支持的协议版本/能力/身份，客户端可先探测再选择（STDIO 上兼作兼容探针） |
+| 结果模型 | `resultType` + `CacheableResult` | 所有结果带 `resultType`（`complete` / `input_required`）；list 类响应带 `ttlMs` / `cacheScope` 支持缓存 |
+| 多轮交互 | MRTR 模式 | 服务器需要更多信息时返回 `InputRequiredResult`，客户端带 `inputResponses` 重试原请求，取代旧的服务器主动请求 |
+| 扩展框架 | Apps / Tasks 正式化 | 服务端渲染 UI（MCP Apps）、长时任务（Tasks 改为 `tasks/get` 轮询 + `tasks/update`）成为官方版本化扩展 |
+| 授权硬化 | OAuth/OIDC | `iss` 校验（RFC 9207）、凭据绑定到授权服务器、Client ID Metadata Documents（CIMD）替代动态注册 DCR |
+| 可观测性 | OpenTelemetry | `_meta` 携带 `traceparent`/`tracestate`/`baggage`，W3C Trace Context 传播 |
+| 弃用 | Roots/Sampling/Logging | 进入 12 个月弃用窗口；HTTP+SSE 迁移到 Streamable HTTP |
+
+对使用者最直接的影响：**旧握手模型没有了，MCP Server 可以像普通 HTTP 服务一样水平扩展**；对开发者，Tools / Resources / Prompts 仍是核心原语，但 Apps（交互 UI）和 Tasks（长任务）给了"工具之外"的两个新维度。从业务落地的视角，MCP 自下而上可以看作五层业务架构：
+
+> 🗺️ MCP 业务分层架构图（ProcessOn 可编辑原图，五层业务视角：应用层 → 编排层 → 协议能力层 → 业务工具层 → 数据基础设施层）：[查看高清架构图](https://www.processon.com/view/link/6ab343a8cb92f406f7f734ec)
+
 架构上，Client 与 Server 通过 JSON-RPC 通信，可以走 **stdio**（本地进程管道，如本机运行）或 **SSE/HTTP**（远程服务）。我的两个 MCP 项目都用了 stdio 模式——因为笔记、画图这类工具往往需要本地凭据，且延迟低。
 
 ## mubu-mcp：把幕布变成 AI 能读写的知识库
