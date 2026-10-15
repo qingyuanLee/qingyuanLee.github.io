@@ -101,7 +101,7 @@ CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--allow-root", ...]
 
 验证：响应头出现 `Access-Control-Allow-Origin: *`，就绪检测才能工作。
 
-### 坑二：iframe 嵌入被 CSP 拦
+### 坑二：iframe 嵌入被 CSP 拦（还是两层）
 
 控制台用 iframe 嵌入 JupyterLab，但 Jupyter 默认响应头是 `Content-Security-Policy: frame-ancestors 'self'`——**只有同源页面才能嵌入它**，`file://` 页面直接被拒。查源码发现官方留了后门：`settings['headers']` 里显式给出 `Content-Security-Policy` 就能覆盖默认值。于是加一份配置文件：
 
@@ -112,7 +112,15 @@ c.ServerApp.tornado_settings = {
 }
 ```
 
-验证：重启后响应头变成 `frame-ancestors *`，iframe 嵌入成功。
+但**这只是第一层**。实测发现 `frame-ancestors *` 里的 `*` 只匹配 http/https/ws 等**网络协议 scheme** 的页面，`file://` 页面的 `file:` scheme 并不在其中——控制台继续报"127.0.0.1 拒绝了我们的连接请求"，浏览器控制台给出明确提示：`'*' matches only URLs with network schemes... The scheme 'file:' must be added explicitly`。解法是显式声明 `file:`：
+
+```python
+c.ServerApp.tornado_settings = {
+    "headers": {"Content-Security-Policy": "frame-ancestors * file:"}
+}
+```
+
+改配置后 `wslc restart pi-harness` 生效，`file://` 打开的控制台里 iframe 内的 JupyterLab 完整渲染（文件树、Launcher、Notebook/Bash 内核都正常）。
 
 **经验**：这类配置尽量用配置文件而不是命令行参数——Windows 下 PowerShell → wslc exec → bash → jupyter 层层引号嵌套，命令行传 JSON 参数是引号地狱，配置文件一劳永逸。
 
