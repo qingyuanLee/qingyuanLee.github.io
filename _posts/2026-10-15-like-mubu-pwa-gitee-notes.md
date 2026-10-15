@@ -4,14 +4,12 @@ title: "不写一行后端代码，我用 PWA + Gitee 仓库搭了个幕布平�
 subtitle: "从 Vercel 到 Netlify 全部注册失败，最后纯静态页面 + 浏览器直连 API 跑通了"
 date: 2026-10-15 14:00:00 +0800
 author: 清源
-header-img: img/post-bg-like-mubu-pwa.jpg
+header-img: img/post-bg-github-cup.jpg
 catalog: true
 tags: [PWA, Gitee, 笔记工具, 纯前端, GitHub Pages]
 ---
 
 ## 引子：为什么要再造一个笔记工具
-
-![图：幕布很好用，但我想要完全自主可控](/img/posts/like-mubu/pain-point.jpg)
 
 我用幕布记笔记三年了——工作日志、生活记录、读书笔记、项目复盘，两百多篇文档全在上面。之前我还写了个 [mubu-mcp](/2026/09/22/mubu-mcp-notes-to-ai/) 连接器让 AI 直接操作幕布。
 
@@ -24,8 +22,6 @@ tags: [PWA, Gitee, 笔记工具, 纯前端, GitHub Pages]
 我的目标很明确：**自己掌控存储，自己控制界面，免费部署，手机电脑都能用**。
 
 ## 技术路线探索：三条路都走不通
-
-![图：Vercel、Netlify、Gitee Pages 三条路全部走不通](/img/posts/like-mubu/failed-paths.jpg)
 
 第一反应是"写个后端部署上去"。但现实给了我三巴掌：
 
@@ -44,8 +40,6 @@ Vercel 是最好的 Serverless 平台，免费额度也够。但我用 GitHub �
 三条路全堵死，逼着我想第四条路。
 
 ## 破局：纯静态页面 + 浏览器直连 API
-
-![图：纯静态 PWA 直接调 Gitee API，中间没有后端](/img/posts/like-mubu/architecture.jpg)
 
 思路突然通了：**为什么一定要有后端？**
 
@@ -107,8 +101,6 @@ Safari"添加到主屏幕"后就是个 PWA App，全屏运行，体验接近原�
 
 ## 踩过的坑清单
 
-![图：踩过的坑汇成一张清单](/img/posts/like-mubu/pitfalls.jpg)
-
 | 坑 | 原因 | 解决 |
 |---|---|---|
 | 图片不渲染 | markdown 里 URL 前后有空格（`]( url )`）→ `%20` 404 | fixGiteeImg 里 trim |
@@ -144,8 +136,6 @@ Safari"添加到主屏幕"后就是个 PWA App，全屏运行，体验接近原�
 **零后端、零服务器成本、零数据库**。所有数据在自己的 Gitee 仓库里，Markdown 格式，随时可以迁移。
 
 ## 反思：纯前端能做什么、不能做什么
-
-![图：纯前端方案的能力边界](/img/posts/like-mubu/limits.jpg)
 
 ### 能做的
 
