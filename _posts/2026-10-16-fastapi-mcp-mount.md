@@ -1,186 +1,114 @@
 ---
 layout: post
-title: "把存量 FastAPI 挂进 MCP，我踩了 8 个坑才跑通"
-subtitle: "fastmcp 4.1.0 从 from_fastapi 到纯 ASGI 中间件：零重构接入 MCP 服务的完整实战"
-date: 2026-10-16 14:00:00 +0800
+title: "存量 FastAPI 挂 MCP，先看懂总体设计再谈踩坑"
+subtitle: "fastmcp 4.1.0 单进程挂载：总体架构、认证职责划分、请求链路，再到 8 个落地坑"
+date: 2026-10-16 15:00:00 +0800
 author: 清源
 header-img: img/posts/fastapi-mcp-mount-cover.jpg
 catalog: true
-tags: [FastAPI, MCP, fastmcp, Python, 工程化]
+tags: [FastAPI, MCP, fastmcp, Python, 架构设计]
 ---
 
 ## 引子：业务方一句话，老服务不能动
 
 ![](/img/posts/fastapi-mcp-mount-cover.jpg)
 
-事情是这样的：业务方想用 MCP 客户端（Claude、Cursor 这类）直接调我们特征服务的接口，要求**服务必须暴露成 MCP 协议**。但我们的服务是个跑了好几年的存量 FastAPI：协程范式、业务 JWT 认证、日志中间件、lifespan 里挂着一堆原系统业务，动哪一块都心惊胆战。
+业务方想用 MCP 客户端（Claude、Cursor 这类）直接调我们特征服务的接口。但服务是个跑了好几年的存量 FastAPI：协程范式、业务 JWT 认证、日志中间件、lifespan 里挂着一堆原系统业务，动哪一块都心惊胆战。
 
-需求翻译成人话就是：**在不重构、不换认证、不接管 lifespan 的前提下，把 MCP 作为"挂载服务"接进来，工具只暴露该暴露的那几个接口。**
+需求翻译成人话：**在不重构、不换认证、不接管 lifespan 的前提下，把 MCP 作为"挂载服务"接进来，工具只暴露该暴露的接口。**
 
-我用 fastmcp 4.1.0 走通了一条路，全程踩了 8 个坑。完整可运行代码在公开库：[github.com/qingyuanLee/fastapi-mcp-demo](https://github.com/qingyuanLee/fastapi-mcp-demo)，这篇是它背后的完整思路。
+这篇文章不讲零散的坑，先讲清楚**总体设计**——单进程里发生了什么、认证职责怎么划分、一条请求怎么走完全链路——最后才是落地时踩过的 8 个坑。完整可运行代码在公开库：[github.com/qingyuanLee/fastapi-mcp-demo](https://github.com/qingyuanLee/fastapi-mcp-demo)。
 
-## 先想清楚三件事（都是认知纠偏）
+## 总体架构：单进程、单端口，MCP 是"挂"上去的
 
-动手之前，有三个"你以为"必须纠正：
+先建立总体认知。整套方案只有一个进程、一个端口、一个 Uvicorn，业务 API 和 MCP 服务共存：
 
-1. **MCP 的 token 和业务 token 不是一回事。** 业务 JWT 要校验过期时间（exp）并自动续期；但 MCP 的 token 由客户端自管生命周期——服务端**跳过 exp 校验、不续期**，只严格校验签名和用户有效性。两条轨，互不干扰。
-2. **MCP 不能接管主应用的 lifespan。** 老项目 lifespan 逻辑复杂，指望 `combined_lifespan` 把它缝进去不现实。正解是"惰性启动"：第一个 `/mcp` 请求进来时，幂等进入 MCP 子应用的 lifespan，之后保持到进程结束。
-3. **中间件必须全部纯 ASGI，禁用 BaseHTTPMiddleware。** 这条铁律排在最前——MCP 的 streamable-http 是 SSE 长连接，`BaseHTTPMiddleware` 会缓冲响应 body，和 SSE 天然冲突。这条坑最后再说，但它决定了整个中间件链的写法。
-
-## 依赖与版本：caret 规范 + 一个隐藏的 httpx2
-
-依赖就三件，版本声明和本地项目规范一致，用 `^`（uv 的 PEP 621 里写成上下限）：
-
-| 依赖 | 声明（caret 等价） | 实际解析 |
-|---|---|---|
-| fastmcp | `>=4.1.0,<5.0.0`（^4.1.0） | 4.1.0 |
-| fastapi | `>=0.138.2,<0.139.0`（^0.138.2） | 0.138.2 |
-| httpx | `>=0.28.1,<0.29.0`（^0.28.1） | 0.28.1 |
-
-```toml
-[project]
-dependencies = [
-    "fastmcp>=4.1.0,<5.0.0",
-    "fastapi>=0.138.2,<0.139.0",
-    "httpx>=0.28.1,<0.29.0",
-]
+```
+┌──────────────────────── Uvicorn 单进程 ────────────────────────┐
+│                  FastAPI 主应用                                 │
+│  ASGI 中间件层（按注册顺序从外到内）                              │
+│  TokenRefresh → Authentication → Access Log → CORS → Limiter  │
+│  (业务路由)      (业务路由)      (全部)    (全部)  (业务路由)     │
+│                                                                 │
+│  ┌───────────────┐        ┌────────────────────────────────┐  │
+│  │ 存量业务路由    │        │ MCP 子应用 (/mcp)              │  │
+│  │ /api/v1/**    │        │ FastMCP 内置认证                │  │
+│  │ (meta/realtime│        │ BusinessTokenVerifier          │  │
+│  │  /offline)    │        │ · 复用 JWT 解码逻辑             │  │
+│  │               │        │ · verify_exp: False            │  │
+│  └───────────────┘        │ MCP 工具 (tools/list, call)    │  │
+│                           └────────────────────────────────┘  │
+│  内部调用：FastMCP → ASGITransport → 存量业务 FastAPI 应用      │
+│  权限透传：MCP 签发 60s 内部 API JWT，业务接口独立校验           │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-**坑 1（隐藏依赖）**：fastmcp 4.x 内部依赖的是 **httpx2**——httpx 2.x 的新包名，实测 2.13.1。它由 fastmcp 自动带入，你**不需要显式声明**，但写代码时必须用 `import httpx2`，不是 `import httpx`。`ASGITransport`、`InternalJWTAuth` 这些一律走 httpx2。第一次在这儿卡住的人不少。
+三个要点：
 
-## 认证：RemoteAuthProvider + 自定义 TokenVerifier
+1. **存量业务路由和 MCP 子应用是并排的兄弟**，都挂在主应用下，互不干扰。MCP 子应用通过 `app.mount("/mcp", mcp_app)` 最后挂载。
+2. **ASGI 中间件层在最外面**，对业务路由和 MCP 一视同仁地过一遍——但认证职责不同（下一节细讲）。
+3. **内部调用不出进程**：MCP 工具调用业务接口时，FastMCP 通过 `ASGITransport` 进程内直连存量业务应用，不发真实 HTTP，数据链路完全复用。
+
+## 认证职责划分：三条路径，三套职责
+
+这是整个方案的**设计核心**。很多人以为"挂个 MCP 认证就行"，其实一条链路里有三种认证职责：
+
+| 请求路径 | 认证执行者 | 过期校验 | 续期 |
+|---|---|---|---|
+| `/api/v1/**`（业务 API） | `AuthenticationMiddleware` + `JwtAuthMiddleware` | ✅ 校验 | ✅ `TokenRefreshMiddleware` 自动续期 |
+| `/mcp`（MCP 服务） | FastMCP `BusinessTokenVerifier` | ❌ 跳过（verify_exp: False） | ❌ 不续期，客户端自管 |
+| `/mcp` → 内部业务调用 | `InternalJWTAuth` 签发 60s 内部 JWT | 内部 JWT 自身有效期 | — |
 
 ![](/img/posts/fastapi-mcp-mount-auth.jpg)
 
 （图：双轨 token——业务 JWT 管自己的过期与续期，MCP token 只管签名与用户有效性）
 
-认证是这套方案的核心。MCP 侧的配置长这样：
+三条路径各干各的，但**共用同一套 JWT 密钥和解码逻辑**——这是"复用"而不是"新造"：
 
-```python
-auth = RemoteAuthProvider(
-    token_verifier=BusinessTokenVerifier(),
-    authorization_servers=settings.mcp_authorization_servers,  # 必填
-    base_url=settings.mcp_resource_server_url,                 # 必填（4.x 替代 resource_server_url）
-)
-```
+- **业务路径**：原有体系分毫不动。校验过期、自动续期、返回 `X-New-Access-Token`。
+- **/mcp 路径**：ASGI 中间件直接放行，认证下沉到 MCP 协议层。`BusinessTokenVerifier` 复用 `JwtAuthMiddleware` 的解码和用户查询逻辑，唯一差异是 `verify_exp: False`。签名仍然严格校验，用户有效性仍然校验——**伪造 Token 和禁用用户照样进不来**。
+- **内部调用路径**：MCP 工具要调业务接口时，**不透传客户端 Token**，而是用 `get_access_token()` 拿到会话用户，签发一张 60 秒的内部 API JWT（独立 issuer/audience）。业务接口看到的是"内部调用"，自己再校验一遍。
 
-这里有两个认知纠偏：
+这个"双轨 + 内部 JWT"设计解决了一个隐蔽问题：MCP 的 token 生命周期由客户端管，业务 token 由服务端管——**两条轨道的时钟和策略完全不同**，强行共用一套会互相打架。
 
-**`authorization_servers` 和 `base_url` 跟服务器 IP 没关系。** 它们只服务 OAuth 元数据和 audience 描述，实际认证走的是自定义 `TokenVerifier`。服务器启动时根本不用知道自己 IP——配置里填部署方给的公网域名就行。这俩参数在 4.x 都是必填、没有默认值。
+## 完整请求链路：一条请求的十步
 
-**坑 2（必须 super().__init__）**：`BusinessTokenVerifier` 继承 `TokenVerifier`，如果你子类的 `__init__` 不调 `super().__init__(...)`，运行期必然报 `'BusinessTokenVerifier' object has no attribute 'required_scopes'`——补上 `required_scopes` 后还会缺 `scopes_supported`，一样是这行解决的。因为 `required_scopes` / `base_url` / `resource_base_url` 这三个属性是父类 `AuthProvider.__init__` 在**实例上赋值**的，子类不调父类构造器，实例上就永远没有这些属性。
+把上面的设计串起来，AI Agent 调一次工具，完整走这十步：
 
-```python
-class BusinessTokenVerifier(TokenVerifier):
-    def __init__(self, base_url=None, required_scopes=None, resource_base_url=None):
-        super().__init__(                     # ★ fastmcp 4.1.0 必备
-            base_url=base_url,
-            required_scopes=required_scopes,
-            resource_base_url=resource_base_url,
-        )
+1. AI 应用连接 `/mcp`，携带 `Authorization: Bearer <JWT>`
+2. `TokenRefreshMiddleware` 检测到 `/mcp` 路径，**直接放行**（不续期）
+3. `AuthenticationMiddleware` 检测到 `/mcp` 路径，**直接放行**（认证下沉）
+4. Access Log、CORS、Limiter 按各自范围执行
+5. 请求路由到 MCP 子应用
+6. `BusinessTokenVerifier` 校验 JWT：签名 + 用户有效性，**跳过过期**
+7. 校验通过，FastMCP 将用户身份注入 MCP 上下文
+8. MCP 工具通过 ASGITransport 调存量业务接口，签发 60 秒内部 JWT
+9. 业务接口独立校验内部 JWT，按原有权限、业务规则、数据链路返回结果
+10. FastMCP 将结果按 MCP 统一格式返回 AI Agent
 
-    async def verify_token(self, token: str) -> AccessToken | None:
-        payload = jwt.decode(
-            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm],
-            options={"verify_exp": False, "verify_aud": False, "verify_iss": False},
-        )  # 跳过 exp，但签名仍严格校验
-        ...
-        return AccessToken(token=token, client_id=str(user_id),
-                           scopes=payload.get("scopes", []),
-                           expires_at=None, claims=payload)
-```
+链路的关键在 6–9：**认证发生在 MCP 协议层（6），权限落在业务层（9）**——MCP 只负责"你是谁"，业务接口负责"你能干什么"。这正是"复用现有平台资产"的落点。
 
-**坑 3（from_fastapi 没有 auth 形参）**：fastmcp 4.1.0 的 `FastMCP.from_fastapi` 签名里没有显式 `auth`，但它的 `**settings` 会透传给 `FastMCP.__init__`——实测 `from_fastapi(..., auth=auth)` 是生效的（`mcp.auth == auth`）。同时**千万别传 `transport`**：`from_fastapi` 内部已经设了 `transport=httpx2.ASGITransport(app=app)`，你再传就 TypeError。
+## 关键设计决策：为什么这么设计
 
-## 工具暴露：两个名字相关的坑
+### 为什么单进程不拆服务
 
-MCP 挂上之后，第一反应是"所有接口都变成工具了"——这就是坑 4。
+拆一个独立 MCP 服务要面对数据链路、配置、部署、权限四套复制问题。单进程挂载让 MCP 工具调用业务接口走 `ASGITransport` 进程内直连——**业务逻辑、权限、数据链路零改动**。代价是同一个进程要兼容两套协议，中间件必须谨慎。
 
-**坑 4（tags 不是过滤器）**：fastmcp 4.x 的 `tags` 参数（旧版叫 `include_tags`）语义是"给全部工具附加标签"，是 union 不是过滤。你给路由打了 `mcp_public` 标签，工具列表照样全量暴露。要过滤必须显式 allowlist：
+### 为什么 /mcp 跳过过期校验
 
-```python
-mcp.enable(tags={"mcp_public"}, only=True)   # ★ 先禁用全部，再启用带标签的组件
-```
+MCP 客户端（AI 应用）自己管理 token 生命周期，服务端掺和续期会打破它的状态模型。所以服务端只做两件事：**严格校验签名、严格校验用户有效性**，过期与否交给客户端。这是个明确的取舍：泄露的过期 token 在用户被禁用前一直有效，缓解靠业务侧续期 + 客户端自管生命周期。
 
-标签在 FastAPI 路由上声明：`router = APIRouter(tags=["mcp_public"])`。
+### 为什么内部调用不透传客户端 token
 
-**坑 5（工具名又长又丑）**：FastAPI 默认的 operation_id 是 `{函数名}_{路径}_{method}`，比如 `query_naming_demo_api_v1_naming_demo_post`，OpenAPIProvider 直接拿它当工具名。解决：
+客户端 Bearer Token 是"你"，内部 JWT 是"你授权的服务替你去调"。透传客户端 token 会让业务接口误以为请求来自客户端，而且 token 一旦泄露就能直达业务层。内部 JWT 60 秒过期、独立 audience，**token 绑定 /mcp，不中继下游**——业务层永远只信任内部签发的短期凭证。
 
-```python
-def _short_generate_unique_id(route):
-    return route.name   # APIRoute.name 默认 = 端点函数名
+### 为什么工具用白名单模式
 
-business_app = FastAPI(
-    title="...",
-    generate_unique_id_function=_short_generate_unique_id,  # ★ 0.138.x 参数名
-)
-```
+存量接口几十个，不可能全暴露给 AI。方案是显式白名单：路由打 `tags=["mcp_public"]`，MCP 侧 `mcp.enable(tags={"mcp_public"}, only=True)` 先禁用全部、再启用带标签的组件。AI 看到的工具清单，就是业务方画过圈的接口。
 
-注意：FastAPI 0.138.x 的参数名是 `generate_unique_id_function`，旧版叫 `generate_unique_id`，传错会被静默忽略，工具名还是老样子。
+## 落地与验证：10 项全过
 
-## 内部调用链路：async_auth_flow + get_access_token
-
-MCP 工具内部要调业务接口，业务接口得认出"这是 MCP 内部调用"。方案是签发一个 60 秒的内部 JWT。
-
-**坑 6（内部调用没有业务 token）**：老项目最初的做法是 `request.headers.get('Authorization')` 取业务 token——但 MCP 工具内部调业务接口时，请求头里**根本没有业务 token**，直接报 `_AuthenticationError(401, 'request need token authentic')`。必须换成从 fastmcp 的会话上下文取用户：`get_access_token()` 拿到会话用户 `sub`，再签内部 JWT。
-
-```python
-class InternalJWTAuth(httpx2.Auth):
-    async def async_auth_flow(self, request):   # ★ 协程范式 → 必须 async_auth_flow
-        access_token = get_access_token()       # fastmcp 会话 token
-        user_id = (access_token.claims.get("sub") if access_token else None) or "system"
-        internal_token = jwt.encode(
-            {"sub": user_id, "iss": "demo-feature-mcp", "aud": "demo-feature-api",
-             "exp": now + timedelta(seconds=settings.internal_jwt_ttl_seconds)},
-            settings.internal_jwt_secret, algorithm=settings.jwt_algorithm,
-        )
-        request.headers["Authorization"] = f"Bearer {internal_token}"
-        yield request
-```
-
-原项目是协程范式，所以这里必须是 `async_auth_flow`，不是同步的 `auth_flow`——这也是当时排查了很久的一个点。
-
-## 中间件铁律：纯 ASGI + 读 body 缓存转发
-
-![](/img/posts/fastapi-mcp-mount-middleware.jpg)
-
-（图：日志中间件是旁观者——读取数据流，但绝不改变它）
-
-这是最后一个大坑，也是耗时最长的。
-
-**坑 7（BaseHTTPMiddleware 与 SSE 冲突）**：老项目日志中间件继承 `BaseHTTPMiddleware`，挂上 MCP 后现象很诡异：initialize 正常，tools/call 报 `ReadError` + `RuntimeError: Attempted to exit a cancel scope`。根因是 `BaseHTTPMiddleware` 缓冲响应 body，跟 SSE 无限流冲突。整个中间件链必须全部改纯 ASGI 实现（类名、日志字段、注册方式不变）：
-
-```
-CORSMiddleware（expose Mcp-Session-Id / WWW-Authenticate / X-New-Access-Token）
-→ AuthenticationMiddleware(JwtAuthMiddleware，/mcp 放行)
-→ McpLifespanMiddleware（首个 /mcp 请求幂等启动）
-→ TokenRefreshMiddleware（跳过 /mcp 不续期）
-→ AccessLogMiddleware → RateLimitMiddleware → McpAccessLogMiddleware
-→ 业务路由 → mount /mcp
-```
-
-**坑 8（读 body 不能吞、更不能编造 disconnect）**：MCP 的所有请求 URL 都是 `/mcp/`，普通访问日志只能看到"调用了 mcp"，看不到具体工具。工具名藏在 JSON-RPC body 里。日志中间件读 body 解析时，**必须"缓存 + 原样转发"**：
-
-```python
-async def receive_wrapper() -> Message:
-    message = await receive()
-    if message["type"] == "http.request":
-        body_chunks.append(message.get("body", b""))   # 缓存
-    return message                                     # ★ 原样转发，绝不吞/绝不编造
-```
-
-如果你吞了消息、或者编造 `http.disconnect`，下游读 body 后再次 receive() 会**误判客户端断开**，SSE 响应被中断——客户端报 `SSE stream ended without a response`，服务器端报 `ASGI callable returned without completing response`。这个坑我们一度误判成"官方客户端兼容差异"，最后定位到是自己中间件的 bug。
-
-修好之后日志长这样，一眼能看到调了哪个工具、谁调的、哪个会话：
-
-```
-[mcp-log] 请求IP:127.0.0.1, 用户:u_demo_001, MCP方法:tools/call,
-工具:query_realtime_feature, 会话:xxx, 响应code:200, 响应时间:0.012s
-```
-
-## 端到端验证：10 项全过
-
-真实环境（fastmcp 4.1.0 / fastapi 0.138.2 / httpx 0.28.1）跑下来的验证表：
+总体设计定完，落到真实环境（fastmcp 4.1.0 / fastapi 0.138.2 / httpx 0.28.1）逐项验证：
 
 | # | 验证项 | 结果 |
 |---|---|---|
@@ -195,32 +123,36 @@ async def receive_wrapper() -> Message:
 | 9 | 过期 token：业务 API 401、/mcp 200（跳过 exp） | ✅ 机制差异 |
 | 10 | 错误签名 token：/mcp 401（签名仍严格校验） | ✅ |
 
-第 9、10 项最能说明双轨设计：**MCP 跳过过期校验但绝不放过错签名**——客户端自管 token 生命周期，服务端只管身份有效性。
+第 9、10 项恰好验证了设计里的"双轨"：**MCP 跳过过期校验但绝不放过错签名**。
 
-## 踩过的坑清单
+## 踩过的 8 个坑
+
+设计归设计，落地时每个环节都有对应的坑（完整代码见公开库，这里只列现象与解法）：
 
 | 坑 | 现象 | 解决 |
 |---|---|---|
-| fastmcp 4.x 依赖 httpx2 | `import httpx` 报错/不兼容 | 一律 `import httpx2`，由 fastmcp 自动带入 |
-| TokenVerifier 不调 super().__init__ | `no attribute 'required_scopes'` / `'scopes_supported'` | 子类 __init__ 必须 super().__init__() |
+| fastmcp 4.x 依赖 httpx2 | `import httpx` 不兼容 | 一律 `import httpx2`，由 fastmcp 自动带入 |
+| TokenVerifier 不调 super().__init__ | `no attribute 'required_scopes'` / `'scopes_supported'` | 子类 __init__ 必须 super().__init__()（父类在实例上赋值） |
 | from_fastapi 传 transport | TypeError | 内部已设 ASGITransport，不传 |
-| from_fastapi 的 tags 当过滤用 | 工具列表全量暴露 | `mcp.enable(tags={"mcp_public"}, only=True)` |
+| from_fastapi 的 tags 当过滤用 | 工具列表全量暴露 | `mcp.enable(tags={"mcp_public"}, only=True)` 显式 allowlist |
 | 默认 operation_id 长工具名 | `query_x_api_v1_x_post` | `generate_unique_id_function` 返回 `route.name` |
 | 内部调用取 request 头业务 token | `_AuthenticationError(401)` | `get_access_token()` 取会话用户签内部 JWT |
-| BaseHTTPMiddleware 用于 MCP | tools/call 报 cancel scope | 全部中间件改纯 ASGI |
-| 日志中间件编造 disconnect | 客户端 SSE stream ended | 读 body 缓存 + 原样转发 |
+| BaseHTTPMiddleware 用于 MCP | tools/call 报 cancel scope / BrokenResourceError | 全部中间件改纯 ASGI（SSE 长连接禁缓冲） |
+| 日志中间件编造 disconnect | 客户端 SSE stream ended | 读 body 缓存 + 原样转发，绝不改变数据流 |
+
+其中最后两个坑（纯 ASGI 铁律、日志只读旁观）我在另一篇里展开过，这里只想强调一句：**坑再多，只要总体设计里的职责划分是对的，每个坑都是局部修补，不会推翻架构。**
 
 ## 写在最后
 
-回头看，这套方案的本质是把"接入 MCP"这件事的**侵入面压到最小**：不重构业务、不让出 lifespan、不换认证体系，只加了一层"挂载 + 过滤 + 内部转发"。
+回头看，这套方案最值钱的是那个"职责划分"——不是技术多难，而是想清楚了：
 
-- **双轨 token**：业务 JWT 管自己的生命周期，MCP token 管自己的，互不掺和
-- **惰性 lifespan**：主应用动都不动，第一个请求来了再启动
-- **纯 ASGI 铁律**：中间件全部避开 BaseHTTPMiddleware，SSE 才能活
+- **认证职责下沉**：ASGI 中间件放行 /mcp，认证交给 MCP 协议层——两边各管一段
+- **token 双轨**：业务 JWT 管生命周期，MCP token 管身份有效性，内部调用用短期 JWT 隔离
+- **单进程挂载**：业务逻辑、权限、数据链路零改动，MCP 只是"挂"上去的
 
-最值钱的经验其实是那个"缓存 + 原样转发"——**日志中间件只是旁观者，绝不能改变数据流**。这句同样适用于所有要给 SSE 长连接加日志/监控的场景。
+**先把总体设计讲清楚，坑才有意义。** 否则看十个坑的解法，也不知道它们为什么是坑。
 
-完整代码、README 和三个验证脚本（smoke / e2e_call / diff_check）都在 [github.com/qingyuanLee/fastapi-mcp-demo](https://github.com/qingyuanLee/fastapi-mcp-demo)，直接 `uv run uvicorn app.main:app --port 8000` 就能跑。
+完整代码、README 和三个验证脚本（smoke / e2e_call / diff_check）都在 [github.com/qingyuanLee/fastapi-mcp-demo](https://github.com/qingyuanLee/fastapi-mcp-demo)，`uv run uvicorn app.main:app --port 8000` 直接跑。
 
 ---
 
