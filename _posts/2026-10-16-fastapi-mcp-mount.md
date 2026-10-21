@@ -142,6 +142,70 @@ MCP 客户端（AI 应用）自己管理 token 生命周期，服务端掺和续
 
 其中最后两个坑（纯 ASGI 铁律、日志只读旁观）我在另一篇里展开过，这里只想强调一句：**坑再多，只要总体设计里的职责划分是对的，每个坑都是局部修补，不会推翻架构。**
 
+## 上生产后才补上的一课：nginx 多后端，会话必须粘住
+
+本地单进程全绿，一旦在前面加了 nginx 反代、后端扩成多台，客户端调 MCP 工具就**偶尔**报 404。错误长这样：
+
+```
+Error POSTing to endpoint (HTTP 404):
+{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Session not found"}}
+```
+
+服务端日志更有意思：同一个会话 ID 下，`GET /mcp/` 一直 200，`POST tools/call` 偶尔 404。
+
+### 根因：会话在内存，不在请求里
+
+streamable-http 的 `Mcp-Session-Id` 是 **uvicorn 进程内存态**：
+
+1. `initialize` 建会话时落在后端 A 的内存
+2. GET（SSE 长连接）TCP 连接一直挂在 A → 所以 GET 永远 200
+3. POST `tools/call` 是新 HTTP 请求，nginx upstream 轮询负载均衡，**偶尔被分到后端 B** → B 的内存里根本没这个会话 → 返回 404 `Session not found`
+
+"偶尔"不是玄学，就是轮询命中率。我在验证项目里用两个独立实例复现了一遍：
+
+| 路由方式（6 次 tools/call，会话建在 8001） | 结果 |
+|---|---|
+| 轮询（模拟 nginx upstream round-robin） | 打 8001 ✅200 / 打 8002 ❌404，约一半失败 |
+| 按 `Mcp-Session-Id` 粘性 | 6/6 全 ✅200，始终命中建会话的后端 |
+
+### 修复：nginx 按会话头做一致性哈希
+
+核心一行：`hash $http_mcp_session_id$remote_addr;`——同一会话永远落同一台后端。initialize 时还没有 session id（为空），拼 `$remote_addr` 兜底，同客户端首包与后续请求也能对齐：
+
+```nginx
+upstream ffs_test {
+    hash $http_mcp_session_id$remote_addr;   # ★ 会话粘性
+    server backend1:8000;
+    server backend2:8000;
+    keepalive 16;
+}
+
+location /mcp/ {                          # ★ location 带尾斜杠，避免 /mcp 触发 307
+    proxy_pass http://ffs_test;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;                  # ★ 别注释！否则上游拿到 host=ffs_test
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;                   # SSE 必须关
+    proxy_cache off;
+    proxy_read_timeout 300s;               # ★ SSE 长连接，防默认 60s 断流
+    proxy_send_timeout 300s;
+}
+```
+
+顺带三个小坑，都是这次一起发现的：
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| upstream 轮询打散会话 | 偶尔 404 `Session not found` | `hash $http_mcp_session_id$remote_addr` 粘性 |
+| `proxy_set_header Host $host` 被注释 | 上游日志里 host=ffs_test，重定向/URL 构造异常 | 取消注释 |
+| `location /mcp` 无尾斜杠 | 客户端打 `/mcp` 时 307 一跳 | `location /mcp/` 带斜杠 |
+| 缺 `proxy_read_timeout` | SSE 长连接 60s 被 nginx 切断 | 配 300s |
+
+一个补充说明：如果 upstream 只有一台后端但 uvicorn 是 `--workers >1`，会话在各 worker 内存间同样不共享——nginx 层帮不上，要么 `--workers 1`，要么把会话外置。等客户端升级到无状态协议（2026-07-28）后每个请求自含上下文，粘性才不再是硬需求。
+
 ## 写在最后
 
 回头看，这套方案最值钱的是那个"职责划分"——不是技术多难，而是想清楚了：
