@@ -180,8 +180,8 @@ upstream ffs_test {
     keepalive 16;
 }
 
-location /mcp/ {                          # ★ location 带尾斜杠，避免 /mcp 触发 307
-    proxy_pass http://ffs_test;
+location /mcp {                          # 无尾斜杠，前缀匹配，通吃 /mcp 和 /mcp/
+    proxy_pass http://ffs_test;          # 无 URI，路径原样透传
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;                  # ★ 别注释！否则上游拿到 host=ffs_test
@@ -201,10 +201,42 @@ location /mcp/ {                          # ★ location 带尾斜杠，避免 /
 |---|---|---|
 | upstream 轮询打散会话 | 偶尔 404 `Session not found` | `hash $http_mcp_session_id$remote_addr` 粘性 |
 | `proxy_set_header Host $host` 被注释 | 上游日志里 host=ffs_test，重定向/URL 构造异常 | 取消注释 |
-| `location /mcp` 无尾斜杠 | 客户端打 `/mcp` 时 307 一跳 | `location /mcp/` 带斜杠 |
+| `location` 写成 `/mcp/` 带斜杠 | 客户端配置的 `/mcp`（无斜杠）被 nginx 自己 404 HTML 页挡掉 | 写 `location /mcp`（前缀透传），尾斜杠交给上游 307 一跳 |
 | 缺 `proxy_read_timeout` | SSE 长连接 60s 被 nginx 切断 | 配 300s |
 
 一个补充说明：如果 upstream 只有一台后端但 uvicorn 是 `--workers >1`，会话在各 worker 内存间同样不共享——nginx 层帮不上，要么 `--workers 1`，要么把会话外置。等客户端升级到无状态协议（2026-07-28）后每个请求自含上下文，粘性才不再是硬需求。
+
+### 另一个 404：闲置半小时后再调，session 被回收了
+
+粘性解决了"每次都 404"，但"偶尔"里还藏着另一种——**闲置 30 分钟以上再调**，报的是同一个 `Session not found`。
+
+根因不在 nginx，在 SDK 源码里：
+
+```python
+# mcp/server/streamable_http_manager.py
+DEFAULT_SESSION_IDLE_TIMEOUT: Final = 30 * 60   # 1800 秒 = 30 分钟
+```
+
+streamable-http 的 session 不光在内存里，还带个 idle 计时器——30 分钟没交互就从内存删掉。客户端本地缓存着旧 `Mcp-Session-Id`，人走开半小时回来再点工具，服务端早就不认了。
+
+本地复现（把 idle 调到 10 秒加速实验）：
+
+| 操作 | 结果 |
+|---|---|
+| initialize → 立即 tools/call | ✅ 200 |
+| idle=10s，闲置 15 秒后再调 | ❌ 404 `Session not found`（错误体与现场逐字一致） |
+| idle 调到 60s，同样闲置 15 秒 | ✅ 200 |
+
+修复一行，在创建 MCP http_app 的地方：
+
+```python
+mcp_app = mcp.http_app(
+    path="/",
+    session_idle_timeout=28800,   # ★ 8 小时，覆盖一个工作日
+)
+```
+
+两个 404 的区别一句话：**轮询打散是"每次都可能"，idle 超时是"闲置够久才"**——前者修 nginx 粘性，后者修服务端超时，两层都要配。
 
 ## 写在最后
 
