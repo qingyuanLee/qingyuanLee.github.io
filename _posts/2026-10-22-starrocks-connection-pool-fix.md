@@ -2,7 +2,7 @@
 layout: post
 title: "StarRocks 连接池偶发断连，两步配置彻底修复"
 subtitle: "pool_pre_ping + pool_recycle：Python × SQLAlchemy 连接 StarRocks 偶发断连的排查与修复实录"
-date: 2026-10-22 12:00:00 +0800
+date: 2026-10-22 09:00:00 +0800
 author: 清源
 header-img: img/post-bg-hacker.jpg
 catalog: true
