@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 engine = create_async_engine(
     your_url,
     # 关键配置1：悲观断连检测（每次取连接前先 Ping 一下）
-    pool_pre_ping=True, 
+    pool_pre_ping=True,
 
     # 关键配置2：定期回收连接（防止连接存活过久）
     pool_recycle=1800,  # 建议值1800秒（30分钟），务必小于服务端 wait_timeout
