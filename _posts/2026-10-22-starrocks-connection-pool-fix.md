@@ -9,7 +9,7 @@ catalog: true
 tags: [StarRocks, Python, SQLAlchemy, 数据库, 连接池]
 ---
 
-```python
+```
 from functools import lru_cache
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from fastapi import ... # 你项目里的其他依赖
@@ -45,7 +45,7 @@ def starrocks_db_session(db_id: str | int):
 
 找到create_starrocks_engine_and_session中创建create_async_engine的地方，加入以下两个关键参数：
 
-```python
+```
 from sqlalchemy.ext.asyncio import create_async_engine
 engine = create_async_engine(
     your_url,
@@ -68,7 +68,7 @@ engine = create_async_engine(
 
 即使有了pool_pre_ping，在极端情况下（如网络抖动恰好发生在 Ping 之后、查询执行之前），仍可能失败。可以在你的 starrocks_db_session 工厂函数外层，加一个轻量级的重试装饰器：
 
-```python
+```
 import functools
 import asyncio
 from sqlalchemy.exc import OperationalError, DBAPIError
