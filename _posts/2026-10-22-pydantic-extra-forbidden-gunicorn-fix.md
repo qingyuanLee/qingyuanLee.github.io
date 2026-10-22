@@ -11,7 +11,7 @@ tags: [Python, Pydantic, Gunicorn, 部署, 排障复盘]
 
 ## 一、现象：服务起不来，Worker 一启动就崩
 
-`ffs.service` 无法启动，systemd 拉起的 Gunicorn Worker 进程启动即崩溃，服务一直处于 `failed` / 反复重启的状态。
+`some_service.service` 无法启动，systemd 拉起的 Gunicorn Worker 进程启动即崩溃，服务一直处于 `failed` / 反复重启的状态。
 
 第一反应通常是查代码、查端口占用、查内存——但真正的报错其实很明确，只是信息长得不像"配置错误"。
 
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
 
 ```
 # 先激活虚拟环境（路径参考你的 systemd 配置）
-source /home/pxuser/.cache/pypoetry/virtualenvs/px-feature-store-server-HKT5DSN6-py3.10/bin/activate
+source /home/user/.cache/pypoetry/virtualenvs/your-service-xxxx-py3.10/bin/activate
 
 # 手动启动 gunicorn，观察详细报错
 gunicorn -c deploy/gunicorn.conf.py backend.app.main:app
@@ -92,10 +92,10 @@ gunicorn -c deploy/gunicorn.conf.py backend.app.main:app
 systemctl daemon-reload
 
 # 重启服务
-systemctl restart ffs
+systemctl restart some_service
 
 # 查看服务状态
-systemctl status ffs
+systemctl status some_service
 ```
 
 ## 五、重点思考：这次排障真正值得记住的东西
