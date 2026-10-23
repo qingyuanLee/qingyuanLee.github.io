@@ -238,6 +238,59 @@ mcp_app = mcp.http_app(
 
 两个 404 的区别一句话：**轮询打散是"每次都可能"，idle 超时是"闲置够久才"**——前者修 nginx 粘性，后者修服务端超时，两层都要配。
 
+### 第三个 404：服务端重启后第一次连接必现
+
+前两个都修完后，又冒出一个更怪的：**只有服务端重启后的第一次连接**报错，之后就正常；客户端关掉重开 N 次都没问题。这个"只发生一次"的特征把方向直接指向了服务端内存——重启清空了，但客户端手里还拿着旧 session。
+
+本地复现（fastmcp 4.1.0 实测）：
+
+| 实验 | 结果 |
+|---|---|
+| initialize 不带 sid | ✅ 200，新建会话 |
+| **initialize 带一个不存在的 sid**（模拟客户端缓存了旧 session） | ❌ **404 `Session not found`** |
+| tools/call 带不存在的 sid | ❌ 404（预期内） |
+| 不带 sid 重新 initialize | ✅ 200，之后全正常 |
+
+根因链条：客户端（Cherry Studio 这类）会缓存上次的 `Mcp-Session-Id`；服务端重启后内存清空，但客户端重连时带着旧 sid 发 `initialize`。FastMCP 的 `streamable_http_manager` 发现该 sid 不存在就直接 404，**而不是当作新会话处理**。客户端收到 404 再 fallback 不带 sid 重连——所以"第一次报错、后面就正常"。
+
+修复思路很朴素：`initialize` 的语义本来就是"建新会话"，协议上就不该带 sid。加一个纯 ASGI 中间件，**只在认出是 initialize 时把 sid 头剥掉**，让 manager 永远按新会话处理：
+
+```python
+class McpInitializeSessionResetMiddleware:
+    async def __call__(self, scope, receive, send):
+        if scope["method"] == "POST" and scope["path"].startswith("/mcp"):
+            first = await receive()                      # peek 第一个请求块
+            if first.get("type") == "http.request":
+                try:
+                    data = json.loads(first["body"])
+                    if data.get("method") == "initialize":
+                        scope = {**scope, "headers": [
+                            h for h in scope["headers"]
+                            if h[0].lower() != b"mcp-session-id"]}
+                except Exception:
+                    pass
+            async def receive_wrapper():                 # 原样透传，不缓存
+                nonlocal first
+                if first is not None:
+                    msg, first = first, None
+                    return msg
+                return await receive()
+            await self.app(scope, receive_wrapper, send)
+            return
+        await self.app(scope, receive, send)
+```
+
+这个中间件写的时候踩了三个坑，值得记下来：
+
+| 尝试 | 结果 | 原因 |
+|---|---|---|
+| drain body 后 replay 完整 body | ❌ 客户端 ReadTimeout | 破坏 mcp_app 的 SSE 响应流 |
+| drain 后 replay + 返回 disconnect | ❌ `ASGI callable returned without completing response` | 下游误判客户端断开，响应没发完 |
+| 无条件 strip sid 头（不读 body） | ❌ 正常 tools/call 变 400 | tools/call 依赖 sid，被误 strip |
+| **peek 第一个块、initialize 才 strip、消息原样透传** | ✅ 全过 | 不破坏流、不误伤 tools/call |
+
+三种 404 汇总：**轮询打散修 nginx 粘性、idle 超时修服务端、重启后第一次连接修服务端 strip——都是"session 在内存里"这一个根因的不同表现**。客户端无状态协议普及之前，这三层都得自己兜。
+
 ## 写在最后
 
 回头看，这套方案最值钱的是那个"职责划分"——不是技术多难，而是想清楚了：
