@@ -174,23 +174,29 @@ streamable-http 的 `Mcp-Session-Id` 是 **uvicorn 进程内存态**：
 
 ```nginx
 upstream ffs_test {
-    hash $http_mcp_session_id$remote_addr;   # ★ 会话粘性
+    # ★ 会话粘性：同一会话永远落同一台后端
+    hash $http_mcp_session_id$remote_addr;
     server backend1:8000;
     server backend2:8000;
     keepalive 16;
 }
 
-location /mcp {                          # 无尾斜杠，前缀匹配，通吃 /mcp 和 /mcp/
-    proxy_pass http://ffs_test;          # 无 URI，路径原样透传
+# 无尾斜杠，前缀匹配，通吃 /mcp 和 /mcp/
+location /mcp {
+    # 无 URI，路径原样透传
+    proxy_pass http://ffs_test;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
-    proxy_set_header Host $host;                  # ★ 别注释！否则上游拿到 host=ffs_test
+    # ★ 别注释！否则上游拿到 host=ffs_test
+    proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_buffering off;                   # SSE 必须关
+    # SSE 必须关
+    proxy_buffering off;
     proxy_cache off;
-    proxy_read_timeout 300s;               # ★ SSE 长连接，防默认 60s 断流
+    # ★ SSE 长连接，防默认 60s 断流
+    proxy_read_timeout 300s;
     proxy_send_timeout 300s;
 }
 ```
@@ -214,7 +220,8 @@ location /mcp {                          # 无尾斜杠，前缀匹配，通吃 
 
 ```python
 # mcp/server/streamable_http_manager.py
-DEFAULT_SESSION_IDLE_TIMEOUT: Final = 30 * 60   # 1800 秒 = 30 分钟
+# 1800 秒 = 30 分钟
+DEFAULT_SESSION_IDLE_TIMEOUT: Final = 30 * 60
 ```
 
 streamable-http 的 session 不光在内存里，还带个 idle 计时器——30 分钟没交互就从内存删掉。客户端本地缓存着旧 `Mcp-Session-Id`，人走开半小时回来再点工具，服务端早就不认了。
@@ -232,7 +239,8 @@ streamable-http 的 session 不光在内存里，还带个 idle 计时器——3
 ```python
 mcp_app = mcp.http_app(
     path="/",
-    session_idle_timeout=28800,   # ★ 8 小时，覆盖一个工作日
+    # ★ 8 小时，覆盖一个工作日
+    session_idle_timeout=28800,
 )
 ```
 
@@ -259,7 +267,8 @@ mcp_app = mcp.http_app(
 class McpInitializeSessionResetMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["method"] == "POST" and scope["path"].startswith("/mcp"):
-            first = await receive()                      # peek 第一个请求块
+            # peek 第一个请求块
+            first = await receive()
             if first.get("type") == "http.request":
                 try:
                     data = json.loads(first["body"])
@@ -269,12 +278,15 @@ class McpInitializeSessionResetMiddleware:
                             if h[0].lower() != b"mcp-session-id"]}
                 except Exception:
                     pass
-            async def receive_wrapper():                 # 原样透传，不缓存
+
+            # 原样透传，不缓存
+            async def receive_wrapper():
                 nonlocal first
                 if first is not None:
                     msg, first = first, None
                     return msg
                 return await receive()
+
             await self.app(scope, receive_wrapper, send)
             return
         await self.app(scope, receive, send)
