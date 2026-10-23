@@ -175,6 +175,7 @@ streamable-http 的 `Mcp-Session-Id` 是 **uvicorn 进程内存态**：
 ```nginx
 upstream ffs_test {
     # ★ 会话粘性：同一会话永远落同一台后端
+
     hash $http_mcp_session_id$remote_addr;
     server backend1:8000;
     server backend2:8000;
@@ -184,18 +185,22 @@ upstream ffs_test {
 # 无尾斜杠，前缀匹配，通吃 /mcp 和 /mcp/
 location /mcp {
     # 无 URI，路径原样透传
+
     proxy_pass http://ffs_test;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     # ★ 别注释！否则上游拿到 host=ffs_test
+
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     # SSE 必须关
+
     proxy_buffering off;
     proxy_cache off;
     # ★ SSE 长连接，防默认 60s 断流
+
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
 }
@@ -221,6 +226,7 @@ location /mcp {
 ```python
 # mcp/server/streamable_http_manager.py
 # 1800 秒 = 30 分钟
+
 DEFAULT_SESSION_IDLE_TIMEOUT: Final = 30 * 60
 ```
 
@@ -240,6 +246,7 @@ streamable-http 的 session 不光在内存里，还带个 idle 计时器——3
 mcp_app = mcp.http_app(
     path="/",
     # ★ 8 小时，覆盖一个工作日
+
     session_idle_timeout=28800,
 )
 ```
@@ -268,6 +275,7 @@ class McpInitializeSessionResetMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["method"] == "POST" and scope["path"].startswith("/mcp"):
             # peek 第一个请求块
+
             first = await receive()
             if first.get("type") == "http.request":
                 try:
@@ -280,6 +288,7 @@ class McpInitializeSessionResetMiddleware:
                     pass
 
             # 原样透传，不缓存
+
             async def receive_wrapper():
                 nonlocal first
                 if first is not None:
