@@ -44,6 +44,28 @@ Linux / macOS：
 .venv\Scripts\python.exe -m pip show debugpy
 ```
 
+如果项目是用 [uv](https://github.com/astral-sh/uv) 管理的虚拟环境，安装 debugpy 有两种更简洁的方式：
+
+**方式一：先激活 venv，再安装**
+
+```bash
+# Linux/macOS
+source .venv/bin/activate
+# Windows
+# .venv\Scripts\activate
+
+uv pip install debugpy
+```
+
+**方式二：无需激活，直接指定 venv 的解释器路径**
+
+```bash
+uv pip install --python .venv/bin/python debugpy          # Linux/macOS
+uv pip install --python .venv/Scripts/python.exe debugpy  # Windows
+```
+
+方式二直接指向 `.venv` 里的解释器，不依赖激活状态，适合在脚本或 CI 中调用。
+
 ## 第二步：创建 .openidea/launch.json
 
 在**项目根目录**（与 `.venv` 同级）下创建 `.openidea` 目录，并在其中新建 `launch.json`，内容如下：
