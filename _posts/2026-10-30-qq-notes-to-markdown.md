@@ -2,7 +2,7 @@
 layout: post
 title: "十年 815 条记事：把 QQ 邮箱记事本整个搬进 Markdown"
 subtitle: "从没文档的私有接口、1283 张会烂掉的外链图片，到一个能装进 Obsidian 的本地笔记库"
-date: 2026-10-30 18:00:00 +0800
+date: 2026-10-30 17:20:00 +0800
 author: 清源
 header-img: img/posts/qq-notes-to-markdown-cover.jpg
 catalog: true
