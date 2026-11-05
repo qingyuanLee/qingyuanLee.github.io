@@ -1,6 +1,6 @@
 # Site settings
-title: 清源笔记
-SEOTitle: 清源笔记 - 技术与生活
+title: 大猫赛博历险记
+SEOTitle: 大猫赛博历险记 - 技术与生活
 header-img: img/post-bg-desk.jpg
 email: 18133101257@163.com
 description: "记录技术沉淀、项目经验与生活思考"
@@ -12,7 +12,7 @@ github_repo: "https://github.com/qingyuanLee/qingyuanLee.github.io.git" # you co
 # Sidebar settings
 sidebar: true                           # whether or not using Sidebar.
 sidebar-about-description: "技术与生活，记录与思考"
-sidebar-avatar: /img/avatar-panda.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`
+sidebar-avatar: /img/avatar-cat.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`
 
 
 
