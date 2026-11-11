@@ -2,7 +2,7 @@
 layout: post
 title: "把 Grip 接上一个没有布局引擎的浏览器：一次 CDP 兼容层的完整实录"
 subtitle: "方案文档里的三行骨架，跑起来三处都不成立；Obscura 的 page socket 是空壳、按键会吞回包、快照头部永远是空字符串"
-date: 2026-11-11 18:30:00 +0800
+date: 2026-11-11 10:00:00 +0800
 author: 清源
 header-img: img/post-bg-hacker.jpg
 catalog: true
