@@ -1,7 +1,7 @@
 ---
 layout: post
 title: "存量 FastAPI 挂 MCP，先看懂总体设计再谈踩坑"
-subtitle: "fastmcp 4.1.0 单进程挂载：总体架构、认证职责划分、请求链路，再到 8 个落地坑"
+subtitle: "fastmcp 4.1.0 单进程挂载：总体架构、认证职责划分、请求链路、8 个落地坑，以及「不要会话」这条根治路径"
 date: 2026-10-16 15:00:00 +0800
 author: 清源
 header-img: img/posts/fastapi-mcp-mount-cover.jpg
@@ -215,7 +215,7 @@ location /mcp {
 | `location` 写成 `/mcp/` 带斜杠 | 客户端配置的 `/mcp`（无斜杠）被 nginx 自己 404 HTML 页挡掉 | 写 `location /mcp`（前缀透传），尾斜杠交给上游 307 一跳 |
 | 缺 `proxy_read_timeout` | SSE 长连接 60s 被 nginx 切断 | 配 300s |
 
-一个补充说明：如果 upstream 只有一台后端但 uvicorn 是 `--workers >1`，会话在各 worker 内存间同样不共享——nginx 层帮不上，要么 `--workers 1`，要么把会话外置。等客户端升级到无状态协议（2026-07-28）后每个请求自含上下文，粘性才不再是硬需求。
+一个补充说明：如果 upstream 只有一台后端但 uvicorn 是 `--workers >1`，会话在各 worker 内存间同样不共享——nginx 层帮不上，要么 `--workers 1`，要么把会话外置。等客户端升级到无状态协议（2026-07-28）后每个请求自含上下文，粘性才不再是硬需求；服务端其实也不必等客户端——主动把会话关掉是另一条路，见后面「第四条路」。
 
 ### 另一个 404：闲置半小时后再调，session 被回收了
 
@@ -312,6 +312,91 @@ class McpInitializeSessionResetMiddleware:
 
 三种 404 汇总：**轮询打散修 nginx 粘性、idle 超时修服务端、重启后第一次连接修服务端 strip——都是"session 在内存里"这一个根因的不同表现**。客户端无状态协议普及之前，这三层都得自己兜。
 
+但这三层都建立在同一个前提上：**会话必须保住**。如果这个前提可以不成立，还有第四条路，而且更省事。
+
+## 第四条路：干脆不要会话
+
+前面三层补丁都在"保住会话"，`stateless_http` 直接把前提拿掉——让服务端根本不发 `Mcp-Session-Id`：
+
+```python
+# 3. MCP ASGI 子应用（无状态：每个请求一个一次性 transport，不下发 session id）
+mcp_app = mcp.http_app(
+    path="/",
+    stateless_http=True,
+)
+```
+
+`stateless_http` 在 fastmcp 4.1.0 里**默认是 `False`**，也就是说：只要你没显式写，框架就一定按"有状态"跑。这不是详设写没写的问题，是默认值的问题。也可以用环境变量兜底：`FASTMCP_STATELESS_HTTP=true`（FastMCP 的 `Settings` 用 `FASTMCP_` 前缀读环境变量，该字段布尔默认 `false`）。
+
+### 实测对比：只改这一个参数
+
+同一台机器起两个实例（fastmcp 4.1.0 / uvicorn 0.54.0 / Python 3.12.13），除 `stateless_http` 外完全相同，用裸 HTTP POST 对打（legacy 请求，不带协议版本头）：
+
+| 请求 | 默认（`stateless_http=False`） | `stateless_http=True` |
+|---|---|---|
+| `tools/list` 不带 sid | 400 `-32600 Bad Request: Missing session ID` | **200，直接返回工具列表**，无 `Mcp-Session-Id` |
+| `tools/list` 带一个不存在的 sid | 404 `Session not found` | **200** |
+| `initialize` 不带 sid | 200，响应头带 `Mcp-Session-Id` | 200，**无 `Mcp-Session-Id`** |
+| `initialize` 带旧 sid（`deadbeef`） | 404 `Session not found` | **200** |
+
+最后一行是重点：前面那个 `McpInitializeSessionResetMiddleware` 之所以必须存在，是因为有状态模式下 `initialize` 带旧 sid 会被 manager 直接 404。**开了无状态，这个中间件就不需要了**——同一个请求在无状态实例上照样 200。
+
+所以这一行开关和前三层是"两条路，不是叠加"：
+
+| 方案 | 解决什么 | 代价 |
+|---|---|---|
+| nginx `hash $http_mcp_session_id$remote_addr` | 多后端轮询打散 | 只对走 nginx 的入口有效，配置要维护 |
+| `session_idle_timeout=28800` | 闲置回收 | 会话仍然占内存 |
+| initialize 剥 sid 中间件 | 重启后首次连接 | 多一层 ASGI，多一处要维护 |
+| **`stateless_http=True`** | 以上三个一起消失 | 失去服务端→客户端通道（见下） |
+
+### 一个必须说清的边界：它只管 legacy 那条腿
+
+这是最容易理解错的地方，也是我一开始的误判：以为 `stateless_http=True` 是"强制服务端走 2026-07-28 新协议"。**不是。**
+
+SDK 是按请求头上的 `MCP-Protocol-Version` 分流的：
+
+- 带 `2026-07-28` 的请求进现代处理器，**本来就无会话**——`stateless_http` 对它没有任何影响；
+- 不带版本头、或带 `2025-11-25` 及更早的请求进 legacy 腿，这才是有 `initialize` 握手和 `Mcp-Session-Id` 的那条。`stateless_http=True` 改的是这条腿：把会话变成"一个 POST 一个一次性 session，不记住、不下发 id"。
+
+实测印证：在**默认 `stateless_http=False`** 的实例上，只要请求带齐，2026-07-28 照样 200 且不带 session。
+
+| 现代协议（2026-07-28）请求 | 结果 |
+|---|---|
+| `MCP-Protocol-Version` + `MCP-Method: tools/list` + `params._meta` 三件套 | 200，无 `Mcp-Session-Id`，`resultType: complete` |
+| 同上，缺 `MCP-Method` | 400 `-32020 mcp-method header does not match the request body's method` |
+| `tools/call` 缺 `MCP-Name` 头 | 400 `-32020 mcp-name header does not match the request body's 'name' parameter` |
+| `tools/call` 头齐全 | 200，`{"content":[{"text":"pong",...}]}` |
+
+顺着这个报错，"客户端要显式声明用新协议"的正确写法也就清楚了——**不是往 `_meta` 里塞一个扁平的 `protocolVersion` 就够**，实测要三处齐：
+
+1. HTTP 头 `MCP-Protocol-Version: 2026-07-28`
+2. HTTP 头 `MCP-Method: <method>`；`tools/call` 再加 `MCP-Name: <tool_name>`（新规范新增的这两个头，就是给网关不开包做路由、限流、计量用的）
+3. `params._meta` 里带命名空间键：`io.modelcontextprotocol/protocolVersion` 与 `io.modelcontextprotocol/clientCapabilities`（缺了直接报 `params._meta must be an object carrying the required ...`）
+
+这也解释了"客户端明明配了版本号却还是回退到 `initialize`"：只改客户端配置里的一行版本号、头不齐，服务端只会回 4xx，客户端随后回落 legacy 握手——现象像"协商失败"，其实是请求本身不合法。
+
+### 代价：单向通道
+
+`stateless_http=True` 不是白拿的。会话只活一个 `POST`，就没有长连接让服务端往回推东西：
+
+- `ctx.elicit()`、sampling、roots 这类**服务端发起**的请求，在 legacy 腿上直接抛 `NoBackChannelError`（顶层协议错误，不是 `is_error` 的工具结果）；
+- 通知不报错，**静默丢弃**；
+- fastmcp 的 `http_app` 在无状态时只挂 `POST` / `DELETE`，`GET` 那条 SSE 长连接干脆不开了。
+
+对我们这篇文章的场景——**工具只往下调业务接口，从不回问客户端**——这三条全是免费的，拿走的本就是没用上的能力。但只要有一个工具要做 elicitation（"帮我确认要查哪个环境"），就得退回有状态 + 粘性。
+
+所以它不是"更好的配置"，而是**按工具形态选**：
+
+| 工具会回问客户端吗 | 部署形态 | 建议 |
+|---|---|---|
+| 不会 | 单实例 | 默认即可；想省心也可开 stateless |
+| 不会 | 多实例 / `--workers >1` | `stateless_http=True`，最省事 |
+| 会（elicit / sampling） | 多实例 | 有状态 + nginx 会话粘性 + `session_idle_timeout` 调大 |
+| 任意 | 客户端已是 2026-07-28 | 与开关无关，天然无会话 |
+
+参考：[FastMCP HTTP 部署](https://gofastmcp.com/v3/deployment/http)、[FastMCP Settings](https://gofastmcp.com/more/settings)、[MCP Python SDK: Serving legacy clients](https://py.sdk.modelcontextprotocol.io/run/legacy-clients/)。
+
 ## 写在最后
 
 回头看，这套方案最值钱的是那个"职责划分"——不是技术多难，而是想清楚了：
@@ -319,6 +404,7 @@ class McpInitializeSessionResetMiddleware:
 - **认证职责下沉**：ASGI 中间件放行 /mcp，认证交给 MCP 协议层——两边各管一段
 - **token 双轨**：业务 JWT 管生命周期，MCP token 管身份有效性，内部调用用短期 JWT 隔离
 - **单进程挂载**：业务逻辑、权限、数据链路零改动，MCP 只是"挂"上去的
+- **会话是可选项**：能不能不要 session，取决于工具会不会回问客户端；能不要就不要，三层 404 修补一起省掉
 
 **先把总体设计讲清楚，坑才有意义。** 否则看十个坑的解法，也不知道它们为什么是坑。
 
