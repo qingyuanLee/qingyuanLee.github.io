@@ -9,6 +9,8 @@ catalog: true
 tags: [MCP, CDP, 无头浏览器, Python, 工程实践]
 ---
 
+> **2026-11-12 勘误（详见[第三期](/2026/11/12/grip-obscura-root-cause/)）**：标题里的「没有布局引擎」、以及本文中「`getBoundingClientRect()` 恒为 0」的判断，后来被逐元素统计推翻 —— Obscura 其实返回**真实坐标**（HN 一个链接是 `[130, 10.6, 213, 25.6]`），恒为 0 的是 `offsetWidth` / `offsetHeight`。元素漏检的现象是真的，但根因和修法都窄得多。本期结尾三条遗留问题里，前两条已在第三期修复，第三条只能改善失败模式。以下保留当时的实测记录，被更正的句子都就地标出。
+
 ## 引子：一份看起来很顺的方案，和三个跑不起来的假设
 
 项目目录里躺着一份方案：把 [Grip](https://github.com/nikolas-sapa/grip-browser)（一个 CDP-native 的 Python SDK，能把整页压成两千 tokens 左右的语义快照）接到 Obscura（一个 Rust 写的轻量无头引擎，对外声称自己是 Chrome 145）上，再套一层薄薄的 MCP 封装，让 LLM 用 `snapshot / click / type` 上网。
@@ -46,7 +48,7 @@ MCP 客户端 ──stdio──> grip-mcp（自建薄封装）
 | target 注册表作用域 | **按连接隔离**：A 连接建的 target，B 连接 attach 报 `Target not found` | 「一条下游连接配一条上游连接」的方案直接死掉 |
 | 事件信封 | 全部带 `sessionId`（`Page.frameNavigated` / `lifecycleEvent` / `Runtime.executionContextCreated` / `Network.*`） | grip 的根监听器收不到任何导航事件 |
 | `Target.getTargetInfo` | 返回 `{"targetId":"browser","title":"","url":""}` | 快照头部 `PAGE:` / `URL:` 永远空 |
-| 布局能力 | `document.querySelector('a').getBoundingClientRect()` 全是 0（`innerWidth 1280`、`innerHeight 720`、`dpr 1`） | grip 依赖几何过滤的元素发现大面积漏检 |
+| 布局能力 | `offsetWidth` / `offsetHeight` 恒为 0（`innerWidth 1280`、`innerHeight 720`、`dpr 1`）；当时用单个 `a` 元素探 rect 得到 0，误推成「rect 恒为 0」 | grip 的 `gripIsHidden()` 把零 offset 判为隐藏，元素发现大面积漏检 |
 
 第三条最难缠。我第一版桥是「每个下游连接各开一条上游连接」，逻辑上最干净，结果 `attach to target page-1 failed: Target not found`。
 
@@ -140,7 +142,7 @@ async def _click(target: str) -> str: ...
 | `read` / `links` | 正文分块、真实链接列表 |
 | `screenshot` / `status` | JPEG 截图、端点与当前 URL |
 
-其中 `links` 是一个绕道设计：grip 的链接列表来自元素发现，而元素发现依赖几何，Obscura 无布局时基本是空的。所以 `links` 不走 grip，改成桥上的 DOM 直查：
+其中 `links` 是一个绕道设计：grip 的链接列表来自元素发现，而元素发现被 `gripIsHidden()` 的零 `offset*` 判断筛空了（勘误：不是 rect 全 0，见文首）。所以 `links` 不走 grip，改成桥上的 DOM 直查：
 
 ```js
 JSON.stringify(Array.from(document.querySelectorAll('a[href]'), a => {
@@ -206,13 +208,13 @@ MCP 标准配置：
 | IANA 页 click `e1` | 跳到 `https://www.iana.org/help` |
 | links | DOM 直查拿到真实链接 |
 
-没解决的，也说清楚：
+当时没解决的，也说清楚（**2026-11-12 状态已更新，见[第三期](/2026/11/12/grip-obscura-root-cause/)**）：
 
-- **元素漏检**。没有布局引擎，`getBoundingClientRect` 恒为 0，grip 的几何过滤会把大部分链接、按钮筛掉 —— HN 只识别出搜索框，IANA 页只识别出一个链接。能识别到的 ref 点了确实会跳转，识别不到的就只能靠 `links` 或 `goto` 绕。
-- **误报 `no_content`**。部分 SPA 结果页会被 grip 的分类器判成 `STATUS: no_content (recovery: retry)`，正文其实在。
-- **代理是硬依赖**。fake-ip DNS 下不给代理，Obscura 直接 SSRF 拦截，这不是代码能修的。
+- **元素漏检** —— ✅ **已修**。当时的描述是「没有布局引擎，`getBoundingClientRect` 恒为 0」，这个根因是错的；真实原因是 `offsetWidth`/`offsetHeight` 恒为 0，被 `gripIsHidden()` 判成隐藏。补一层从真实 rect 反推 `offset*` 的 shim 后，四页发现数变成 0→1 / 1→230 / 0→70 / 10→80。但全量发现会让复杂页 token 涨 3–5 倍，所以默认关掉，只在 `click`/`type` 找不到目标时按需注入。
+- **误报 `no_content`** —— ✅ **已修**。部分 SPA 结果页会被判成 `STATUS: no_content (recovery: retry)`，正文其实在；现在出快照前用 DOM 正文复核，误报改成「页面不为空、别重试导航」的提示。
+- **代理是硬依赖** —— ❌ **不可消除**。fake-ip DNS 下不给代理，Obscura 直接 SSRF 拦截；只能提前探测端口、明确告警、把状态暴露给 `status`。
 
-下一步如果还要用这套东西，最值钱的一件事是给 `click` 补一条兜底：DOM 直查 + 文本匹配拿到元素，再 `click_at` 走坐标点击。现在的 `click` 只能点「恰好被 grip 看见」的那几个元素。
+当时写的「下一步最值钱的是给 `click` 补一条兜底」后来确实做了，但做法不同：不是 `click_at` 坐标点击（grip 本来就走 JS `el.click()`，不依赖坐标），而是**按需注入 shim → 重拍快照 → 重试同一动作**。实测 `click("Learn more")` 能自动兜底并跳到 `iana.org/help/example-domains`。
 
 ## 写在最后
 
@@ -223,3 +225,9 @@ MCP 标准配置：
 以及一个老规律又被验证：**方案文档里的骨架，通常只验证了「思路」，没有验证「跑得起来」**。三行代码里藏着三处假设，每一处都需要用真实端点去打一次才知道成不成立。这活儿没有捷径，只能一条一条探，然后一条一条补。
 
 代码和全部探测脚本都在 [grip-obscura-mcp](https://github.com/qingyuanLee/grip-obscura-mcp)，README 里把这几条 CDP 差异，以及每个坑的复现方式都记了下来。
+
+---
+
+> **续篇（第二期）**：[跑通之后才算账：grip-obscura 的六类边界修复、token 收益实测与两条查询通道的分工](/2026/11/12/grip-obscura-benefit/) —— 链路跑通之后的边界体检、收益验收，以及最后怎么定工具分工。
+
+> **续篇（第三期）**：[把「没解决」的三条真修掉：一次根因纠错、token 代价与内核级进程兜底](/2026/11/12/grip-obscura-root-cause/) —— 本文结尾三条遗留问题的复跑与修复，含对上文「没有布局引擎」判断的勘误。
